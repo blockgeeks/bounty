@@ -68,20 +68,12 @@ contract BountyBG {
             _users.length == _rewards.length
         );
 
-
-
-
-
         bounty.ended = true;
         bounty.endTime = block.timestamp;
         uint256 currentRewards = 0;
         for (uint8 i = 0; i < _rewards.length; i++) {
             currentRewards += _rewards[i];
         }
-
-
-
-
 
         require(bounty.bounty >= currentRewards);
 
