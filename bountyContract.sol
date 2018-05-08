@@ -1,21 +1,6 @@
-pragma solidity ^0.4.14;
+pragma solidity ^0.4.23;
 
 contract BountyBG {
-
-    address public owner;
-
-    uint256 public bountyCount = 0;
-    uint256 public minBounty = 10 finney;
-    uint256 public bountyFee = 2 finney;
-    uint256 public bountyFeeCount = 0;
-    uint256 public bountyBeneficiariesCount = 2;
-    uint256 public bountyDuration = 30 hours;
-
-    mapping(uint256 => Bounty) bountyAt;
-
-    event BountyStatus(string _msg, uint256 _id, address _from, uint256 _amount);
-    event RewardStatus(string _msg, uint256 _id, address _to, uint256 _amount);
-    event ErrorStatus(string _msg, uint256 _id, address _to, uint256 _amount);
 
     struct Bounty {
         uint256 id;
@@ -28,20 +13,36 @@ contract BountyBG {
         bool retracted;
     }
 
-    function BountyBG() public {
-        owner = msg.sender;
-    }
+    address public owner;
+    uint256 public minBountyAmount = 10 finney;
+    uint256 public bountyFee = 2 finney;
+    uint256 public totalFeeCollected = 0;
+    uint256 public bountyBeneficiariesCount = 2;
+    uint256 public bountyDuration = 30 hours;
+
+    Bounty[] public bounties;
+    mapping(uint => address) public bountyOwner;
+    mapping(address => uint[]) ownedBounties;
+
+    event BountyStatus(string _msg, uint256 _id, address _from, uint256 _amount);
+    event RewardStatus(string _msg, uint256 _id, address _to, uint256 _amount);
+    event ErrorStatus(string _msg, uint256 _id, address _to, uint256 _amount);
 
     modifier onlyOwner() {
         require(msg.sender == owner);
         _;
     }
 
-    // BLOCKGEEKS ACTIONS
+    constructor() public {
+        owner = msg.sender;
+    }
 
+    // ========================
+    // OWNER ONLY ACTIONS
+    // ========================
     function withdrawFee(uint256 _amount) external onlyOwner {
-        require(_amount <= bountyFeeCount);
-        bountyFeeCount -= _amount;
+        require(_amount <= totalFeeCollected);
+        totalFeeCollected -= _amount;
         owner.transfer(_amount);
     }
 
@@ -49,16 +50,20 @@ contract BountyBG {
         bountyDuration = _bountyDuration;
     }
 
-    function setMinBounty(uint256 _minBounty) external onlyOwner {
-        minBounty = _minBounty;
+    function setMinBountyAmount(uint256 _minBountyAmount) external onlyOwner {
+        minBountyAmount = _minBountyAmount;
     }
 
     function setBountyBeneficiariesCount(uint256 _bountyBeneficiariesCount) external onlyOwner {
         bountyBeneficiariesCount = _bountyBeneficiariesCount;
     }
 
+    function destroyContract() external onlyOwner {
+        selfdestruct(owner);
+    }
+
     function rewardUsers(uint256 _bountyId, address[] _users, uint256[] _rewards) external onlyOwner {
-        Bounty storage bounty = bountyAt[_bountyId];
+        Bounty storage bounty = bounties[_bountyId];
         require(
             !bounty.ended &&
             !bounty.retracted &&
@@ -76,84 +81,72 @@ contract BountyBG {
         }
 
         require(bounty.bounty >= currentRewards);
+        bounty.remainingBounty -= currentRewards;
 
         for (i = 0; i < _users.length; i++) {
-            _users[i].transfer(_rewards[i]);
-            RewardStatus("Reward sent", bounty.id, _users[i], _rewards[i]);
-            /* if (_users[i].send(_rewards[i])) {
-                bounty.remainingBounty -= _rewards[i];
-                RewardStatus('Reward sent', bounty.id, _users[i], _rewards[i]);
-            } else {
-                ErrorStatus('Error in reward', bounty.id, _users[i], _rewards[i]);
-            } */
+            _users[i].transfer(_rewards[i]); // TODO: use withdraw pattern
+            emit RewardStatus("Reward sent", bounty.id, _users[i], _rewards[i]);
         }
     }
 
     function rewardUser(uint256 _bountyId, address _user, uint256 _reward) external onlyOwner {
-        Bounty storage bounty = bountyAt[_bountyId];
+        Bounty storage bounty = bounties[_bountyId];
         require(bounty.remainingBounty >= _reward);
         bounty.remainingBounty -= _reward;
 
         bounty.ended = true;
         bounty.endTime = block.timestamp;
-        
-        _user.transfer(_reward);
-        RewardStatus('Reward sent', bounty.id, _user, _reward);
+
+        _user.transfer(_reward); // TODO: use withdraw pattern
+        emit RewardStatus('Reward sent', bounty.id, _user, _reward);
     }
 
-    // USER ACTIONS TRIGGERED BY METAMASK
+    // ========================
+    // USER ACTIONS
+    // ========================
+    function createBounty() external payable {
+        require(msg.value >= minBountyAmount + bountyFee);
 
-    function createBounty(uint256 _bountyId) external payable {
-        require(
-            msg.value >= minBounty + bountyFee
-        );
-        Bounty storage bounty = bountyAt[_bountyId];
-        require(bounty.id == 0);
-        bountyCount++;
-        bounty.id = _bountyId;
-        bounty.bounty = msg.value - bountyFee;
-        bounty.remainingBounty = bounty.bounty;
-        bountyFeeCount += bountyFee;
-        bounty.startTime = block.timestamp;
-        bounty.owner = msg.sender;
-        BountyStatus('Bounty submitted', bounty.id, msg.sender, msg.value);
+        uint id = bounties.length;
+        uint bountyAmount = msg.value - bountyFee;
+        totalFeeCollected += bountyFee;
+
+        ownedBounties[msg.sender].push(id);
+        bountyOwner[id] = msg.sender;
+
+        bounties.push(Bounty(id, msg.sender, bountyAmount, bountyAmount, block.timestamp, 0, false, false));
+        emit BountyStatus('Bounty submitted', id, msg.sender, bountyAmount);
     }
 
     function cancelBounty(uint256 _bountyId) external {
-        Bounty storage bounty = bountyAt[_bountyId];
+        Bounty storage bounty = bounties[_bountyId];
         require(
             msg.sender == bounty.owner &&
             !bounty.ended &&
             !bounty.retracted &&
-            bounty.owner == msg.sender &&
             bounty.startTime + bountyDuration < block.timestamp
         );
         bounty.ended = true;
         bounty.retracted = true;
-        bounty.owner.transfer(bounty.bounty);
-        BountyStatus('Bounty was canceled', bounty.id, msg.sender, bounty.bounty);
+        bounty.owner.transfer(bounty.bounty); //TODO: use withdraw pattern!! Potential re-entrance attack!
+        emit BountyStatus('Bounty was canceled', bounty.id, msg.sender, bounty.bounty);
     }
 
 
+    // ========================
     // CUSTOM GETTERS
-
+    // ========================
     function getBalance() external view returns (uint256) {
-        return this.balance;
+        return address(this).balance;
     }
 
-    function getBounty(uint256 _bountyId) external view
-    returns (uint256, address, uint256, uint256, uint256, uint256, bool, bool) {
-        Bounty memory bounty = bountyAt[_bountyId];
-        return (
-            bounty.id,
-            bounty.owner,
-            bounty.bounty,
-            bounty.remainingBounty,
-            bounty.startTime,
-            bounty.endTime,
-            bounty.ended,
-            bounty.retracted
-        );
+    function getTotalBounties() external view returns (uint256) {
+        return bounties.length;
     }
+
+    function getOwnersBounties(address _owner) external view returns (uint[]) {
+        return ownedBounties[_owner];
+    }
+
 
 }
